@@ -28,16 +28,17 @@ app.post('/', function(req, res) {
 // console.log("========== startUrl:", startUrl, "==========");
 
   // initialize link store for coordinating data between asynch http requests
-  var linkStore = {};
-  linkStore[startUrl] = false;
-// TODO remove debugging
-// linkStore['http://www.google.com'] = false;
+  var linkStore = {
+    visited: {},
+    events: {},
+  };
+  linkStore.visited[startUrl] = false;
 
   // start web crawler using startUrl
   crawlLinks(linkStore,
     function(data) {
       // respond with final links if extract succeeded
-      res.send(200, Object.keys(data));
+      res.send(200, Object.keys(data.events));
     },
     function(err) {
       // respond with error if extract failed
@@ -65,7 +66,10 @@ function parseLinks(html, baseUrl) {
   $ = cheerio.load(html);
   var links = $('a');
 
-  var storage = {}
+  var storage = {
+    visited: {},
+    events: {},
+  }
   for (var i = 0; i < links.length; i++) {
     var link = links[i].attribs.href;
     if (link) {
@@ -78,7 +82,12 @@ function parseLinks(html, baseUrl) {
       // saving link only if valid and from same domain
       if (link.match(baseUrl)) {
         if (validateUrl(link)) {
-          storage[link] = storage[link] || false;
+          storage.visited[link] = storage.visited[link] || false;
+        }
+
+        // saving link if event
+        if (isEvent(link, baseUrl)) {
+          storage.events[link] = storage.events[link] || true;
         }
       }
     }
@@ -89,7 +98,7 @@ function parseLinks(html, baseUrl) {
 
 // url validation function
 function validateUrl(textval) {
-  // TODO need to find better way fo validating urls
+  // TODO need to find better way to validate urls
   // NOTE regex barfs on urls with lots of dashes
   var urlregex = new RegExp(
     "^(http|https|ftp)\://([a-zA-Z0-9\.\-]+(\:[a-zA-Z0-9\.&amp;%\$\-]+)*@)*((25[0-5]|2[0-4][0-9]|[0-1]{1}[0-9]{2}|[1-9]{1}[0-9]{1}|[1-9])\.(25[0-5]|2[0-4][0-9]|[0-1]{1}[0-9]{2}|[1-9]{1}[0-9]{1}|[1-9]|0)\.(25[0-5]|2[0-4][0-9]|[0-1]{1}[0-9]{2}|[1-9]{1}[0-9]{1}|[1-9]|0)\.(25[0-5]|2[0-4][0-9]|[0-1]{1}[0-9]{2}|[1-9]{1}[0-9]{1}|[0-9])|([a-zA-Z0-9\-]+\.)*[a-zA-Z0-9\-]+\.(com|edu|gov|int|mil|net|org|biz|arpa|info|name|pro|aero|coop|museum|[a-zA-Z]{2}))(\:[0-9]+)*(/($|[a-zA-Z0-9\.\,\?\'\\\+&amp;%\$#\=~_\-]+))*$");
@@ -125,18 +134,18 @@ function collectLinks(targetUrl, successCB, errorCB) {
     function(data) {
       // parse all links from page
       var baseUrl = targetUrl.match(/(https?:\/\/[^\/]+)\/?/)[1];
-      var linkStore = parseLinks(data, baseUrl);
+      var newLinks = parseLinks(data, baseUrl);
 
       // fire success callback
-      successCB(linkStore);
+      successCB(newLinks);
     }, errorCB);
 }
 
 // return array of unvisited urls in linkStore
 function unvisitedUrls(linkStore) {
   var result = [];
-  for (var url in linkStore) {
-    if (!linkStore[url]) {
+  for (var url in linkStore.visited) {
+    if (!linkStore.visited[url]) {
       result.push(url);
     }
   }
@@ -152,17 +161,16 @@ function mergeHash(target, source, defaultVal) {
 
 // crawl links in linkStore
 function crawlLinks(linkStore, successCB, errorCB) {
+  // TODO move crawlSet and minEventsFound to global config vars
   var crawlSet = 10;
+  var minEventsFound = 10;
   var unvisited = unvisitedUrls(linkStore).slice(0, crawlSet);
 
-  // fire success callback when no more links to crawl
-  if (!unvisited.length) {
+  // fire success callback when no unvisited links or enough events found
+  if (!unvisited.length ||
+      Object.keys(linkStore.events).length >= minEventsFound) {
     return successCB(linkStore);
   }
-
-  // fire success callback if enough links found
-
-
 
   // crawl unvisited urls for more links
   var visitCount = 0;
@@ -170,13 +178,14 @@ function crawlLinks(linkStore, successCB, errorCB) {
     var targetUrl = unvisited[i];
 
     // mark link as visited
-    linkStore[targetUrl] = true;
+    linkStore.visited[targetUrl] = true;
 
     // collect links from target url
     collectLinks(targetUrl,
       function(links) {
         // merge links into linkStore
-        mergeHash(linkStore, links, false);
+        mergeHash(linkStore.visited, links.visited, false);
+        mergeHash(linkStore.events, links.events, true);
 
         // recurse after all requests completed
         visitCount++;
@@ -188,46 +197,22 @@ function crawlLinks(linkStore, successCB, errorCB) {
   }
 }
 
+// filter for determining whether a link seems like an event
+function isEvent(link, filterKey) {
+  // site specific filters to determine whether a link is an event
+  // default filter used if no specific site or filter is found
+  var filters = {
+    'http://calendar.boston.com': '',
+    'http://www.sfmoma.org': '',
+    'http://www.workshopsf.org': '',
+    'http://events.stanford.edu': '',
+    // default filter just looks for an ending numerical path
+    // under the assumption that event links will contain some ID
+    default: function(link) {
+      return link.match('\/[^\/]*?\\d+?[^\/]*?$');
+    },
+  };
+  var filter = filters[filterKey] || filters['default'];
 
-// filter links based on potential base pattern
-function filterLinks(links) {
-  var filtered = [];
-  for (var key in links) {
-    console.log("checking:", key);
-    if (key.match(/\/[^\/]*?\d+?[^\/]*?$/)) {
-      filtered.push(key);
-    }
-  }
-
-// // TODO remove debugging sanity check
-// var loopCount = 0;
-//   while (filtered.length < 10 && partial.length > 0 && loopCount < 10) {
-// // TODO remove debugging sanity check
-// console.log("loopCount:", loopCount);
-
-//     // save any links that match truncated pattern
-//     for (var key in links) {
-// console.log("checking key:", key);
-//       if (key.match(partial)) {
-// console.log("MATCH DETECTED");
-// console.log("key:", key);
-//         filtered.push(key);
-//       }
-//     }
-
-//     // truncate pattern if ending seems to be a numerical id
-//     if (partial.match(/\/[^\/]*?\d+?[^\/]*?$/)) {
-// console.log("pre partial:", partial);
-//       partial = partial.replace(/\/[^\/]*?\d+?[^\/]*?$/, '');
-// console.log("post partial:", partial);
-//     } else {
-//       break;
-//     }
-
-// // TODO remove debugging
-// // sanity check to abort inifinite loops
-// loopCount++;
-//   }
-
-  return filtered;
+  return filter(link);
 }
