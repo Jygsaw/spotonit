@@ -159,10 +159,12 @@ function mergeHash(target, source, defaultVal) {
   }
 }
 
-// crawl links in linkStore
+// crawl links listed in linkStore
 function crawlLinks(linkStore, successCB, errorCB) {
   // TODO move crawlSet and minEventsFound to global config vars
-  var crawlSet = 10;
+  // crawlSet = number of urls to crawl for each iteration
+  var crawlSet = 1;
+  // minEventsFound = minimum number of events to find before ending crawl
   var minEventsFound = 10;
   var unvisited = unvisitedUrls(linkStore).slice(0, crawlSet);
 
@@ -200,16 +202,25 @@ function crawlLinks(linkStore, successCB, errorCB) {
 // filter for determining whether a link seems like an event
 function isEvent(link, filterKey) {
   // site specific filters to determine whether a link is an event
-  // default filter used if no specific site or filter is found
+  // default filter used if no specific filter is found
+  // filters currently use regex on link but can be changed to pull and analyze page structure
   var filters = {
-    'http://calendar.boston.com': '',
-    'http://www.sfmoma.org': '',
-    'http://www.workshopsf.org': '',
-    'http://events.stanford.edu': '',
-    // default filter just looks for an ending numerical path
-    // under the assumption that event links will contain some ID
+    'http://calendar.boston.com': function(link) {
+      return link.match('^http://calendar.boston.com/[^\/]+?/events/show/\\d+');
+    },
+    'http://www.sfmoma.org': function(link) {
+      return link.match('^http://www.sfmoma.org/exhib_events/events/');
+    },
+    'http://www.workshopsf.org': function(link) {
+      return link.match('^http://www.workshopsf.org/.*\?page_id=140');
+    },
+    'http://events.stanford.edu': function(link) {
+      return link.match('^http://events.stanford.edu/events/\\d+?/\\d+?');
+    },
+    // default filter looks for a path that starts with filterKey(ie. the baseUrl), containing 'event',
+    // and ending numerical path under the assumption that event links will contain some ID
     default: function(link) {
-      return link.match('\/[^\/]*?\\d+?[^\/]*?$');
+      return link.match('^' + filterKey + '.*?event.*?\\d+');
     },
   };
   var filter = filters[filterKey] || filters['default'];
