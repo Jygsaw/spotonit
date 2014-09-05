@@ -1,6 +1,7 @@
 var express = require('express');
 var bodyParser = require('body-parser');
 var http = require('http');
+var https = require('https');
 var cheerio = require('cheerio');
 var app = express();
 
@@ -10,46 +11,38 @@ app.use(bodyParser.urlencoded({
   extended: false,
 }));
 
-// display targetUrl input form
+// display startUrl input form
 app.get('/', function(req, res) {
   res.sendfile('www/index.html');
 });
 
-// extract sibling events of targetUrl
+// extract sibling events of startUrl
 app.post('/', function(req, res) {
   // parse given target url
-  var targetUrl = req.body.targetUrl;
+  var startUrl = req.body.startUrl;
 // TODO remove debugging
-// targetUrl = "http://calendar.boston.com/lowell_ma/events/show/274127485-mrt-presents-shakespeares-will";
-// targetUrl = "http://www.sfmoma.org/exhib_events/exhibitions/513";
-// targetUrl = "http://www.workshopsf.org/?page_id=140&id=1328";
-// targetUrl = "http://events.stanford.edu/events/353/35309/";
-console.log("targetUrl:", targetUrl);
+// startUrl = "http://calendar.boston.com/lowell_ma/events/show/274127485-mrt-presents-shakespeares-will";
+// startUrl = "http://www.sfmoma.org/exhib_events/exhibitions/513";
+// startUrl = "http://www.workshopsf.org/?page_id=140&id=1328";
+// startUrl = "http://events.stanford.edu/events/353/35309/";
+// console.log("========== startUrl:", startUrl, "==========");
 
-  // fetch target url
-  http.get(targetUrl, function(getRes) {
-    // successful fetch of url
-    console.log("Fetch succeeded:", targetUrl);
+  // initialize link store for coordinating data between asynch http requests
+  var linkStore = {};
+  linkStore[startUrl] = false;
+// TODO remove debugging
+// linkStore['http://www.google.com'] = false;
 
-    // receive page contents and parse for links
-    collectData(getRes, function(data) {
-      // parse all links from page
-      var links = parseLinks(data);
-
-      // filter out extraneous links
-      links = filterLinks(links, targetUrl);
-
-      // respond with final links
-      res.send(200, links);
+  // start web crawler using startUrl
+  crawlLinks(linkStore,
+    function(data) {
+      // respond with final links if extract succeeded
+      res.send(200, Object.keys(data));
+    },
+    function(err) {
+      // respond with error if extract failed
+      res.send(400, err.message);
     });
-  }).on('error', function(e) {
-    // error while fetching url
-    console.log("Fetch failed:", targetUrl);
-    console.log(">> Error:", e.message);
-
-    // respond with error
-    res.send(400, e.message);
-  });
 });
 
 app.listen(app.get('port'), function() {
@@ -68,55 +61,173 @@ function collectData(res, callback) {
 };
 
 // parse links
-function parseLinks(html) {
+function parseLinks(html, baseUrl) {
   $ = cheerio.load(html);
   var links = $('a');
 
-  var linkStore = {};
+  var storage = {}
   for (var i = 0; i < links.length; i++) {
-    linkStore[links[i].attribs.href] = false;
-  }
+    var link = links[i].attribs.href;
+    if (link) {
+      // TODO need to optimize baseUrl prepending and url validation
+      // prepending baseUrl if relative link
+      if (!link.match(/^[^:]+?:/)) {
+        link = baseUrl + link;
+      }
 
-  return linkStore;
-}
-
-// filter links based on potential base pattern
-function filterLinks(links, basePattern) {
-  // strip off domain
-  var partial = basePattern.replace(/^https?:\/\/.*?\//, '/');
-  console.log("partial:", partial);
-
-  console.log("===== FILTERING LINKS =====");
-  var filtered = [];
-// TODO remove debugging sanity check
-var loopCount = 0;
-  while (filtered.length < 10 && partial.length > 0 && loopCount < 10) {
-// TODO remove debugging sanity check
-console.log("loopCount:", loopCount);
-
-    // save any links that match truncated pattern
-    for (var key in links) {
-console.log("checking key:", key);
-      if (key.match(partial)) {
-console.log("MATCH DETECTED");
-console.log("key:", key);
-        filtered.push(key);
+      // saving link only if valid and from same domain
+      if (link.match(baseUrl)) {
+        if (validateUrl(link)) {
+          storage[link] = storage[link] || false;
+        }
       }
     }
-
-    // truncate pattern if ending seems to be a numerical id
-    if (partial.match(/\/[^\/]*?\d+?[^\/]*?$/)) {
-console.log("pre partial:", partial);
-      partial = partial.replace(/\/[^\/]*?\d+?[^\/]*?$/, '');
-console.log("post partial:", partial);
-    } else {
-      break;
-    }
-
-// TODO remove debugging
-// sanity check to abort inifinite loops
-loopCount++;
   }
+
+  return storage;
+}
+
+// url validation function
+function validateUrl(textval) {
+  // TODO need to find better way fo validating urls
+  // NOTE regex barfs on urls with lots of dashes
+  var urlregex = new RegExp(
+    "^(http|https|ftp)\://([a-zA-Z0-9\.\-]+(\:[a-zA-Z0-9\.&amp;%\$\-]+)*@)*((25[0-5]|2[0-4][0-9]|[0-1]{1}[0-9]{2}|[1-9]{1}[0-9]{1}|[1-9])\.(25[0-5]|2[0-4][0-9]|[0-1]{1}[0-9]{2}|[1-9]{1}[0-9]{1}|[1-9]|0)\.(25[0-5]|2[0-4][0-9]|[0-1]{1}[0-9]{2}|[1-9]{1}[0-9]{1}|[1-9]|0)\.(25[0-5]|2[0-4][0-9]|[0-1]{1}[0-9]{2}|[1-9]{1}[0-9]{1}|[0-9])|([a-zA-Z0-9\-]+\.)*[a-zA-Z0-9\-]+\.(com|edu|gov|int|mil|net|org|biz|arpa|info|name|pro|aero|coop|museum|[a-zA-Z]{2}))(\:[0-9]+)*(/($|[a-zA-Z0-9\.\,\?\'\\\+&amp;%\$#\=~_\-]+))*$");
+  return urlregex.test(textval);
+}
+
+// retrieve page
+function fetchPage(targetUrl, successCB, errorCB) {
+  // fetch target url
+  if (targetUrl.match(/^https/)) {
+    protocol = https;
+  } else {
+    protocol = http;
+  }
+  protocol.get(targetUrl, function(res) {
+    // successful fetch of url
+    console.log(">>> Fetch succeeded:", targetUrl);
+
+    // receive page contents and execute success callback
+    collectData(res, successCB);
+  }).on('error', function(err) {
+      // error while fetching url
+      console.log("Fetch failed:", targetUrl);
+
+      // fire error callback
+      errorCB(err);
+  });
+}
+
+// collect links from target url
+function collectLinks(targetUrl, successCB, errorCB) {
+  fetchPage(targetUrl,
+    function(data) {
+      // parse all links from page
+      var baseUrl = targetUrl.match(/(https?:\/\/[^\/]+)\/?/)[1];
+      var linkStore = parseLinks(data, baseUrl);
+
+      // fire success callback
+      successCB(linkStore);
+    }, errorCB);
+}
+
+// return array of unvisited urls in linkStore
+function unvisitedUrls(linkStore) {
+  var result = [];
+  for (var url in linkStore) {
+    if (!linkStore[url]) {
+      result.push(url);
+    }
+  }
+  return result;
+}
+
+// merge two hashes without overwriting original value
+function mergeHash(target, source, defaultVal) {
+  for (var key in source) {
+    target[key] = target[key] || defaultVal;
+  }
+}
+
+// crawl links in linkStore
+function crawlLinks(linkStore, successCB, errorCB) {
+  var crawlSet = 10;
+  var unvisited = unvisitedUrls(linkStore).slice(0, crawlSet);
+
+  // fire success callback when no more links to crawl
+  if (!unvisited.length) {
+    return successCB(linkStore);
+  }
+
+  // fire success callback if enough links found
+
+
+
+  // crawl unvisited urls for more links
+  var visitCount = 0;
+  for (var i = 0; i < unvisited.length; i++) {
+    var targetUrl = unvisited[i];
+
+    // mark link as visited
+    linkStore[targetUrl] = true;
+
+    // collect links from target url
+    collectLinks(targetUrl,
+      function(links) {
+        // merge links into linkStore
+        mergeHash(linkStore, links, false);
+
+        // recurse after all requests completed
+        visitCount++;
+        if (visitCount === unvisited.length) {
+          crawlLinks(linkStore, successCB, errorCB);
+        }
+      }, 
+      errorCB);
+  }
+}
+
+
+// filter links based on potential base pattern
+function filterLinks(links) {
+  var filtered = [];
+  for (var key in links) {
+    console.log("checking:", key);
+    if (key.match(/\/[^\/]*?\d+?[^\/]*?$/)) {
+      filtered.push(key);
+    }
+  }
+
+// // TODO remove debugging sanity check
+// var loopCount = 0;
+//   while (filtered.length < 10 && partial.length > 0 && loopCount < 10) {
+// // TODO remove debugging sanity check
+// console.log("loopCount:", loopCount);
+
+//     // save any links that match truncated pattern
+//     for (var key in links) {
+// console.log("checking key:", key);
+//       if (key.match(partial)) {
+// console.log("MATCH DETECTED");
+// console.log("key:", key);
+//         filtered.push(key);
+//       }
+//     }
+
+//     // truncate pattern if ending seems to be a numerical id
+//     if (partial.match(/\/[^\/]*?\d+?[^\/]*?$/)) {
+// console.log("pre partial:", partial);
+//       partial = partial.replace(/\/[^\/]*?\d+?[^\/]*?$/, '');
+// console.log("post partial:", partial);
+//     } else {
+//       break;
+//     }
+
+// // TODO remove debugging
+// // sanity check to abort inifinite loops
+// loopCount++;
+//   }
 
   return filtered;
 }
